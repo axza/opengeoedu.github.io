@@ -1,12 +1,14 @@
 FETCH_WEBMETA = FALSE
-EMAIL = "" #pass email adress in order to use nominatim service of openstreetmap, 
+
+if(!exists("EMAIL"))
+  EMAIL = "" #pass email adress in order to use nominatim service of openstreetmap, 
 # see terms of use: https://operations.osmfoundation.org/policies/nominatim/)
 # more information: https://wiki.openstreetmap.org/wiki/Nominatim, http://nominatim.openstreetmap.org/
 require(xml2)
 require(htmltools)
 require(stringr)
 
-portale <- read.csv("data/portale_geocoded3.csv", as.is = TRUE)
+portale <- read.csv("data/portale_geocoded4.csv", as.is = TRUE)
 
 #dp geocoding if coordinates are missing
 for(i in 1:dim(portale)[1]){
@@ -37,11 +39,12 @@ for(i in 1:dim(portale)[1]){
         }else{
           query <- paste0("q=",address)
         }
-        .url <- paste0("http://nominatim.openstreetmap.org/search?",URLencode(query),"&format=xml&country_codes=de,ch,at&email=",EMAIL,"&country=",portale[i,]$Land)
+        .url <- paste0("http://nominatim.openstreetmap.org/search?",URLencode(query),"&format=xml&country_codes=de,ch,at,li&email=",EMAIL,"&country=",portale[i,]$Land)
         success <- TRUE
         desc <- NULL
         tryCatch({
-          xres <- read_xml(.url)
+          con <- url(.url)
+          xres <- read_xml(con)
           xloc <- xml_find_first(xres, ".//place")
           lon <- xml_attr(xloc,"lon")
           lat <- xml_attr(xloc,"lat")
@@ -57,7 +60,8 @@ for(i in 1:dim(portale)[1]){
           success <- FALSE
           print(e)
         },finally = {
-          # close(con)
+          try(close(con), silent = TRUE)
+          
         })
         if (!success) {
           warning("Failed determine geolocation of ", address)
@@ -135,13 +139,15 @@ library(rgdal)
 library(sp)
 library(geosphere)
 
+if(!dir.exists("out_geodata"))
+  dir.create("out_geodata")
 portale.sp <- portale
 coordinates(portale.sp) <- ~lon + lat
 proj4string(portale.sp) <- CRS("+proj=longlat +datum=WGS84")
 #plot(portale.sp)
 writeOGR(portale.sp, dsn = "out_geodata/portale.geojson", layer = "portale", driver = "GeoJSON", overwrite_layer = TRUE)
 writeOGR(portale.sp, dsn = "out_geodata/portale.shp", layer = "portale", driver = "ESRI Shapefile", overwrite_layer = TRUE)
-write.csv(portale, file = "data/portale_geocoded3.csv", row.names = FALSE)
+write.csv(portale, file = "data/portale_geocoded4.csv", row.names = FALSE)
 
 portale.gk3 <- spTransform(portale.sp, CRS("+init=epsg:31467")) #GK Zone 3
 portale.gk3.shifted <- as.data.frame(portale.gk3)
@@ -154,23 +160,56 @@ portale.gk3.shifted <- as.data.frame(portale.gk3)
 #rounded coordinates prcision
 RDIST <- 20000
 rcs <- round(coordinates(portale.gk3)/RDIST)*RDIST
-
 #find identical coordinate pairs
 rcpairs <- as.factor(paste(rcs[,"lat"], rcs[,"lon"]))
 overlaps <- levels(rcpairs)[table(rcpairs) > 1]
+point_id_groups <- sapply(overlaps, function(overlap){
+  point_ids <- which(rcpairs == overlap)
+  point_ids
+})
+
+rcs <- round((coordinates(portale.gk3)+(RDIST/2))/RDIST)*RDIST
+rcpairs <- as.factor(paste(rcs[,"lat"], rcs[,"lon"]))
+overlaps <- levels(rcpairs)[table(rcpairs) > 1]
+all_point_ids <- unlist(point_id_groups,use.names = FALSE)
 
 sapply(overlaps, function(overlap){
-  #find the ids of overlapping points
   point_ids <- which(rcpairs == overlap)
-  x0 <- mean(coordinates(portale.gk3)[point_ids[1], 1]) # approximate center of the coordinates
-  y0 <- mean(coordinates(portale.gk3)[point_ids[1], 2])
+  id_group <- point_ids[!point_ids %in% all_point_ids]
+  if(length(id_group)>1){
+  }
+    return(invisible())
+})
+
+#point_id_groups
+
+
+sapply(point_id_groups, function(point_ids){
+  #point_ids <- point_id_groups[[1]]
+  point_ids <- unlist(point_ids)
+  #find the ids of overlapping points
+  #point_ids <- which(rcpairs == overlap)
+  x0 <- mean(coordinates(portale.gk3)[point_ids, 1]) # approximate center of the coordinates
+  y0 <- mean(coordinates(portale.gk3)[point_ids, 2])
   #cat(x0, "- ",y0, "\n")
+  
   n <- length(point_ids) #number of points to be shifted
-  vec <- seq(from=0, by=2*pi/n, length.out = n)
-  r <- RDIST/4
+  vec <- 2*pi/(3*n)+seq(from=0, by=2*pi/n, length.out = n)
+  r <- max(1, n/3)*RDIST/5
   xc <- c(x0+r*sin(vec))
   yc <- c(y0+r*cos(vec))
-  portale.gk3.shifted[point_ids, c("lon","lat")] <<- data.frame(xc, yc)
+  
+  pold <- coordinates(portale.gk3)[point_ids,]#shifted_points[point_ids, c(1,2)] 
+  arcs <- mapply(function(xp, yp){
+    arc <- atan2(xp-x0, yp-y0)*360/(2*pi)
+    if(arc<0)
+      arc <- arc + 360
+    # text(xp,yp, labels = round(arc))
+    arc
+  },  xp=pold[,1],
+  yp=pold[,2]
+  )
+  portale.gk3.shifted[point_ids[order(arcs)], c("lon","lat")] <<- data.frame(xc, yc)
   return(invisible())
 })
 
@@ -223,10 +262,10 @@ if(!file.exists("data/auxiliary.RData")){
     #s5bounds <- SpatialPolygonsDataFrame(data = s5bounds@data, Sr = ms_simplify(s5bounds))
     s6bounds <- readOGR("data/bounds/Switzerland_AL6.GeoJson")
     #s6bounds <- SpatialPolygonsDataFrame(data = s6bounds@data, Sr = ms_simplify(s6bounds))
-    
+    b_objs <- ls()[stringr::str_detect(ls(), "bounds$")]
     sapply(b_objs, function(.boundary){
       obj <- get(.boundary)
-      assign(.boundary, SpatialPolygonsDataFrame(data = obj@data, Sr = ms_simplify(obj, keep = 0.02)), inherits = TRUE,)
+      assign(.boundary, SpatialPolygonsDataFrame(data = obj@data, Sr = ms_simplify(obj, keep = 0.015, keep_shapes=TRUE)), inherits = TRUE,)
       return(invisible())
     })
     g2bounds <- readOGR("data/bounds/Germany_AL2.GeoJson")
@@ -245,7 +284,7 @@ if(!file.exists("data/auxiliary.RData")){
     a2bounds <- SpatialPolygonsDataFrame(data = noId(a2bounds@data), gUnaryUnion(a4bounds))
     s2bounds <- readOGR("data/bounds/Switzerland_AL2.GeoJson")
     s2bounds <- SpatialPolygonsDataFrame(data = noId(s2bounds@data), gUnaryUnion(s4bounds))
-    b_objs <- ls()[stringr::str_detect(ls(), "bounds$")]
+    
     save(file = "data/auxiliary.RData", list = ls()[stringr::str_detect(ls(), "bounds$")])
 }
 
